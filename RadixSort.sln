@@ -1,0 +1,30 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.11.35327.3
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "CudaRuntime1", "CudaRuntime1\CudaRuntime1.vcxproj", "{853002AB-D0B3-4A8D-B99B-1A5C2232A2D3}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{5A099BCB-6A10-4CED-B33E-6518EE97058E}"
+	ProjectSection(SolutionItems) = preProject
+		.gitignore = .gitignore
+	EndProjectSection
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{853002AB-D0B3-4A8D-B99B-1A5C2232A2D3}.Debug|x64.ActiveCfg = Debug|x64
+		{853002AB-D0B3-4A8D-B99B-1A5C2232A2D3}.Debug|x64.Build.0 = Debug|x64
+		{853002AB-D0B3-4A8D-B99B-1A5C2232A2D3}.Release|x64.ActiveCfg = Release|x64
+		{853002AB-D0B3-4A8D-B99B-1A5C2232A2D3}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {96E311B8-B4C5-4AD0-9ECB-DE676213F991}
+	EndGlobalSection
+EndGlobal

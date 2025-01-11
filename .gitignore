@@ -1,0 +1,29 @@
+# Ignore build directories
+/bin/
+/obj/
+/build/
+
+# Ignore Visual Studio temporary files
+.vs/
+.vscode/
+*.user
+*.userosscache
+*.suo
+*.vssscc
+*.vspscc
+
+# Ignore CUDA specific files
+*.ptx
+*.cubin
+*.fatbin
+
+# Ignore system files
+Thumbs.db
+.DS_Store
+
+# Ignore compiled CUDA binaries
+*.dll
+*.exe
+*.out
+*.o
+*.a
