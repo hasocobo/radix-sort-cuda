@@ -1,85 +1,260 @@
 #ifndef __CUDACC__ 
-#define __CUDACC__ // Needed for Visual Studio to recognize __syncthreads and atomicAdd
+#define __CUDACC__ // Needed for Visual Studio to recognize __syncthreads
 #endif
+
+#define BLOCK_SIZE 1024
 
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include "../include/radixSort.h"
+#include "../include/utils.h"
+
+#include <math.h>
 #include <stdio.h>
 
-// Kernel to perform counting sort based on the digit at the given place value
-__global__ void countSortKernel(int* d_input, int* d_output, int* d_hist, int num_elements, int digit_place) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+// for a thread tid, check if a (bit & inputVals[tid]) == 0
+__global__
+void checkBit(unsigned int* const dInputVals, unsigned int* const dOutputPredicate,
+	const unsigned int bit, const size_t numElems)
+{
+	const unsigned int id = blockDim.x * blockIdx.x + threadIdx.x;
+	if (id >= numElems)
+		return;
 
-    // Check for valid index
-    if (idx >= num_elements) return;
-
-    // Count occurrences of each digit in the input array
-    int digit = (d_input[idx] / digit_place) % 10;
-
-    // Use atomicAdd on global memory to update the histogram
-    atomicAdd(&d_hist[digit], 1);
-
-    __syncthreads(); // Make sure histogram updates are done
-
-    // Perform prefix sum (cumulative sum) on the histogram using shared memory
-    __shared__ int hist[10];
-    if (threadIdx.x < 10) {
-        hist[threadIdx.x] = d_hist[threadIdx.x];
-    }
-
-    __syncthreads();
-
-    // Compute prefix sum for histogram in shared memory
-    for (int stride = 1; stride < 10; stride *= 2) {
-        if (threadIdx.x >= stride) {
-            hist[threadIdx.x] += hist[threadIdx.x - stride];
-        }
-        __syncthreads();
-    }
-
-    // After computing prefix sum, place elements in the correct position
-    if (idx < num_elements) {
-        int digit = (d_input[idx] / digit_place) % 10;
-        int pos = hist[digit] - 1;  // Get the correct position from the cumulative histogram
-        d_output[pos] = d_input[idx];   // Place the element in the output array
-
-        // Synchronize threads before proceeding
-        __syncthreads();
-
-        // Update histogram to track the next position for this digit
-        atomicAdd(&d_hist[digit], 1);
-    }
+	int predicate = ((dInputVals[id] & bit) == 0);
+	dOutputPredicate[id] = predicate;
 }
 
-void radixSort(int* d_input, int* d_output, int num_elements) {
-    const int threads_per_block = 256;
-    const int blocks = (num_elements + threads_per_block - 1) / threads_per_block;
+// Flips the bits in the list for example: 0 1 0 1 1 1 0 -> 1 0 1 0 0 0 1
+__global__
+void flipBit(unsigned int* const dList, const size_t numElems)
+{
+	const unsigned int id = blockDim.x * blockIdx.x + threadIdx.x;
+	if (id >= numElems)
+		return;
 
-    int* d_hist;
-    cudaMalloc(&d_hist, 10 * sizeof(int));  // Allocate memory for the histogram
-    cudaMemset(d_hist, 0, 10 * sizeof(int)); // Initialize the histogram to 0
+	dList[id] = ((dList[id] + 1) % 2);
+}
 
-    // Loop over each digit place (1's, 10's, 100's, etc.)
-    for (int digit_place = 1; digit_place <= 1000000; digit_place *= 10) {
-        countSortKernel << <blocks, threads_per_block >> > (d_input, d_output, d_hist, num_elements, digit_place);
+// Blelloch scan or also known as partial prefix sum makes a sum operation in the list similar to += operator:
+// scan(0 1 0 1 1 1) -> 0 0 1 1 2 3
+__global__
+void partialPrefixSum(unsigned int* const dList, unsigned int* const dBlockSums, const size_t numElems)
+{
+	extern __shared__ unsigned int sBlockScan[];
 
-        // Debug: Check for kernel errors
-        cudaError_t err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
-        }
+	const unsigned int tid = threadIdx.x;
+	const unsigned int id = blockDim.x * blockIdx.x + tid;
 
-        cudaDeviceSynchronize();  // Synchronize to ensure all threads are done
+	if (id >= numElems)
+		sBlockScan[tid] = 0;
+	else
+		sBlockScan[tid] = dList[id];
+	__syncthreads();
 
-        // Debug: Verify the output after each kernel execution
-        int* temp = d_input;
-        d_input = d_output;
-        d_output = temp;
+	unsigned int i;
+	for (i = 2; i <= blockDim.x; i <<= 1) {
+		if ((tid + 1) % i == 0) {
+			unsigned int neighborOffset = i >> 1;
+			sBlockScan[tid] += sBlockScan[tid - neighborOffset];
+		}
+		__syncthreads();
+	}
+	i >>= 1;
+	if (tid == (blockDim.x - 1)) {
+		dBlockSums[blockIdx.x] = sBlockScan[tid];
+		sBlockScan[tid] = 0;
+	}
+	__syncthreads();
 
-        // Reset the histogram for the next pass
-        cudaMemset(d_hist, 0, 10 * sizeof(int));
-    }
+	for (i = i; i >= 2; i >>= 1) {
+		if ((tid + 1) % i == 0) {
+			unsigned int neighborOffset = i >> 1;
+			unsigned int oldNeighbor = sBlockScan[tid - neighborOffset];
+			sBlockScan[tid - neighborOffset] = sBlockScan[tid];
+			sBlockScan[tid] += oldNeighbor;
+		}
+		__syncthreads();
+	}
 
-    cudaFree(d_hist);  // Free the histogram memory
+	if (id < numElems) {
+		dList[id] = sBlockScan[tid];
+	}
+}
+
+__global__
+void incrementPrefixSum(unsigned int* const dPredicateScan,
+	unsigned int* const dBlockSumScan, const size_t numElems)
+{
+	const unsigned int id = blockDim.x * blockIdx.x + threadIdx.x;
+	if (id >= numElems)
+		return;
+
+	dPredicateScan[id] += dBlockSumScan[blockIdx.x];
+}
+
+// swap elements to their new locations.
+__global__
+void scatter(unsigned int* const dInput, unsigned int* const dOutput,
+	unsigned int* const dPredicateTrueScan, unsigned int* const dPredicateFalseScan,
+	unsigned int* const dPredicateFalse, unsigned int* const dNumPredicateTrueElements,
+	const size_t numElems)
+{
+	const unsigned int id = blockDim.x * blockIdx.x + threadIdx.x;
+	if (id >= numElems)
+		return;
+
+	unsigned int newLoc;
+	if (dPredicateFalse[id] == 1) {
+		newLoc = dPredicateFalseScan[id] + *dNumPredicateTrueElements;
+	}
+	else {
+		newLoc = dPredicateTrueScan[id];
+	}
+
+	if (newLoc >= numElems)
+		printf("ALERT dPredicateFalse[id]: %i newLoc: %i numElems: %i\n", dPredicateFalse[id], newLoc, numElems);
+
+	dOutput[newLoc] = dInput[id];
+}
+
+unsigned int* dPredicate; // predicate: (x & 1) == 0 that is if a bit is 0, predicate is 1 and vice versa
+unsigned int* dPredicateTrueScan; // prefix sum of predicates that are 1
+unsigned int* dPredicateFalseScan; // "" "" "" "" that are 0
+unsigned int* dNumPredicateTrueElements; // predicate elements that are 1 
+unsigned int* dNumPredicateFalseElements; // predicate elements that are 0
+unsigned int* dBlockSums;
+
+void radixSort(unsigned int* const dInputVals,
+	unsigned int* const dInputPos,
+	unsigned int* const dOutputVals,
+	unsigned int* const dOutputPos,
+	const size_t numElems)
+{
+	int blockSize = BLOCK_SIZE;
+
+	size_t size = sizeof(unsigned int) * numElems;
+	int gridSize = ceil(float(numElems) / float(blockSize));
+
+	checkCudaErrors(cudaMalloc((void**)&dPredicate, size));
+	checkCudaErrors(cudaMalloc((void**)&dPredicateTrueScan, size));
+	checkCudaErrors(cudaMalloc((void**)&dPredicateFalseScan, size));
+	checkCudaErrors(cudaMalloc((void**)&dNumPredicateTrueElements, sizeof(unsigned int)));
+	checkCudaErrors(cudaMalloc((void**)&dNumPredicateFalseElements, sizeof(unsigned int)));
+	checkCudaErrors(cudaMalloc((void**)&dBlockSums, gridSize * sizeof(unsigned int)));
+
+	unsigned int nsb; //next significant bit
+	unsigned int maxBits = 31;
+	for (unsigned int bit = 0; bit < maxBits; bit++) {
+		nsb = 1 << bit;
+
+		if ((bit + 1) % 2 == 1) {
+			checkBit << <gridSize, blockSize >> > (dInputVals, dPredicate, nsb, numElems);
+		}
+		else {
+			checkBit << <gridSize, blockSize >> > (dOutputVals, dPredicate, nsb, numElems);
+		}
+		
+		cudaDeviceSynchronize();
+		
+		checkCudaErrors(cudaGetLastError());
+
+		
+		checkCudaErrors(cudaMemcpy(dPredicateTrueScan, dPredicate, size, cudaMemcpyDeviceToDevice));
+		checkCudaErrors(cudaMemset(dBlockSums, 0, gridSize * sizeof(unsigned int)));
+
+
+		partialPrefixSum << <gridSize, blockSize, sizeof(unsigned int)* blockSize >> >
+			(dPredicateTrueScan, dBlockSums, numElems);
+		
+		cudaDeviceSynchronize();
+
+		checkCudaErrors(cudaGetLastError());
+
+
+		partialPrefixSum << <1, BLOCK_SIZE, sizeof(unsigned int)* BLOCK_SIZE >> >
+			(dBlockSums, dNumPredicateTrueElements, gridSize);
+		
+		cudaDeviceSynchronize();
+		
+		checkCudaErrors(cudaGetLastError());
+
+
+		incrementPrefixSum << <gridSize, blockSize >> >
+			(dPredicateTrueScan, dBlockSums, numElems);
+		
+		cudaDeviceSynchronize();
+		
+		checkCudaErrors(cudaGetLastError());
+
+
+		flipBit << <gridSize, blockSize >> >
+			(dPredicate, numElems);
+		
+		cudaDeviceSynchronize();
+		
+		checkCudaErrors(cudaGetLastError());
+
+		
+		checkCudaErrors(cudaMemcpy(dPredicateFalseScan, dPredicate, size, cudaMemcpyDeviceToDevice));
+		checkCudaErrors(cudaMemset(dBlockSums, 0, gridSize * sizeof(unsigned int)));
+
+		
+		partialPrefixSum << <gridSize, blockSize, sizeof(unsigned int)* blockSize >> >
+			(dPredicateFalseScan, dBlockSums, numElems);
+		cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+		
+		partialPrefixSum << <1, BLOCK_SIZE, sizeof(unsigned int)* BLOCK_SIZE >> >
+			(dBlockSums, dNumPredicateFalseElements, gridSize);
+		cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+		
+		incrementPrefixSum << <gridSize, blockSize >> >
+			(dPredicateFalseScan, dBlockSums, numElems);
+		cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+		
+		// if bit is 0
+		if ((bit + 1) % 2 == 1) {
+			scatter << <gridSize, blockSize >> >
+				(dInputVals, dOutputVals, dPredicateTrueScan, dPredicateFalseScan,
+				dPredicate, dNumPredicateTrueElements, numElems);
+			
+			cudaDeviceSynchronize();
+			
+			checkCudaErrors(cudaGetLastError());
+		
+
+			scatter << <gridSize, blockSize >> > (dInputPos, dOutputPos, dPredicateTrueScan, dPredicateFalseScan,
+				dPredicate, dNumPredicateTrueElements, numElems);
+			
+			cudaDeviceSynchronize();
+			
+			checkCudaErrors(cudaGetLastError());
+		}
+		else {
+			scatter << <gridSize, blockSize >> > (dOutputVals, dInputVals, dPredicateTrueScan, dPredicateFalseScan,
+				dPredicate, dNumPredicateTrueElements, numElems);
+			
+			cudaDeviceSynchronize();
+			
+			checkCudaErrors(cudaGetLastError());
+			
+			
+			scatter << <gridSize, blockSize >> > (dOutputPos, dInputPos, dPredicateTrueScan, dPredicateFalseScan,
+				dPredicate, dNumPredicateTrueElements, numElems);
+			
+			cudaDeviceSynchronize();
+			
+			checkCudaErrors(cudaGetLastError());
+		}
+	}
+
+	checkCudaErrors(cudaFree(dPredicate));
+	checkCudaErrors(cudaFree(dPredicateTrueScan));
+	checkCudaErrors(cudaFree(dPredicateFalseScan));
+	checkCudaErrors(cudaFree(dNumPredicateTrueElements));
+	checkCudaErrors(cudaFree(dNumPredicateFalseElements));
+	checkCudaErrors(cudaFree(dBlockSums));
 }
