@@ -134,7 +134,8 @@ void radixSort(unsigned int* const dInputVals,
 	int blockSize = BLOCK_SIZE;
 
 	size_t size = sizeof(unsigned int) * numElems;
-	int gridSize = ceil(float(numElems) / float(blockSize));
+	int gridSize = (numElems + blockSize - 1) / blockSize;
+	gridSize = std::min(gridSize, 65535);
 
 	checkCudaErrors(cudaMalloc((void**)&dPredicate, size));
 	checkCudaErrors(cudaMalloc((void**)&dPredicateTrueScan, size));
